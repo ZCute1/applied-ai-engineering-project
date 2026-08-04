@@ -1,30 +1,63 @@
-# PawPal+ (Module 2 Project)
+# 🐾 PawPal+ — an AI pet care planner that checks its own work
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+**PawPal+** is a Streamlit app that turns a plain-English request — *"set up a
+daily routine for Mochi, I'm at work 09:00–17:00"* — into a real, conflict-free
+daily schedule. An AI planner retrieves care guidance from a local knowledge base,
+adds the tasks, runs a deterministic scheduler, inspects the result for conflicts
+and tasks that didn't fit, and repairs the plan before answering.
 
-## Scenario
+Why it matters: a language model asked to plan a pet's day will confidently invent
+walk lengths and quietly double-book the afternoon. PawPal+ takes both jobs away
+from it. Care numbers must come from a cited source note, and every placement
+decision is made by code that has 117 tests behind it.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+### The original project
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+This builds on **PawPal+ (Modules 1–3)**, a pet care planning assistant designed
+from UML and implemented in Python. Its original goal was to represent an owner,
+their pets, and their care tasks, then build and explain a daily schedule that
+respected duration, priority, preferred times, and the owner's fixed commitments.
+That version could sort and filter tasks, detect same-time conflicts, spawn
+recurring tasks on completion, and roll the day forward — all driven by forms in a
+Streamlit UI, with no AI involved.
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+**What this module added:** an agentic AI planner (`pawpal_agent.py`) and a
+retrieval-augmented care knowledge base (`pawpal_knowledge.py` + `knowledge/`),
+wired into the same `Owner` object the existing UI already renders.
 
-## What you will build
+## Architecture Overview
 
-Your final app should:
+**Diagram:** [`diagrams_final/architecture.mmd`](diagrams_final/architecture.mmd)
+(system components and data flow) — plus
+[`diagrams_final/agent_loop.mmd`](diagrams_final/agent_loop.mmd) (the loop as a
+sequence diagram) and [`diagrams_final/uml_final.mmd`](diagrams_final/uml_final.mmd)
+(the class model).
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+Data flows in one direction, and the AI sits in the middle rather than at the end:
 
-## Getting started
+1. **Input** — the owner types a request into the **🤖 Ask PawPal** box in `app.py`.
+2. **AI layer** (`pawpal_agent.py`) — `plan_day()` runs a hand-rolled tool loop
+   against Gemini. The model reads the day's real state, calls the **retriever**
+   (`pawpal_knowledge.py`) to ground what the pet needs, then calls tools to add
+   tasks and commitments.
+3. **Source of truth** (`pawpal_system.py`) — the scheduler places everything.
+   The **evaluator**, `review_plan()`, reports the scheduler's own verdict:
+   conflicts, unplaced tasks, and the open gaps left in the day.
+4. **Fix** — if the evaluator reports problems, the model retimes or resizes the
+   offending task and rebuilds. Up to 3 rounds, then it stops and says so.
+5. **Output** — the agent's tools mutate the same `Owner` the page is built from,
+   so the schedule table redraws with the result. A step log shows every tool call.
+6. **Verification** — two layers. **Automated:** 117 pytest tests cover the tools,
+   the retrieval ranking, and the scheduler, all offline. **Human:** the step log,
+   the cited source filenames, and a readable corpus expander let you check the
+   AI's reasoning, and you can override any time by hand.
 
-### Setup
+The key boundary: **the model never writes a timetable.** It decides *what* to
+schedule and *how to repair* a plan the scheduler calls broken. `pawpal_system.py`
+doesn't import `pawpal_agent.py`, so the domain model and its whole test suite run
+with no AI dependency at all.
+
+## Setup
 
 ```bash
 python -m venv .venv
@@ -55,15 +88,95 @@ PAWPAL_MODEL=gemini-3.5-flash streamlit run app.py
 Everything else — the scheduler, the terminal demo, the test suite, and the whole
 Streamlit UI apart from the "Ask PawPal" box — runs without a key.
 
-### Suggested workflow
+### Run it
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+```bash
+streamlit run app.py     # the full app, including the AI planner
+python main.py           # terminal demo of the scheduler, no key needed
+python -m pytest         # 117 tests, no key and no network needed
+```
+
+## 💬 Sample Interactions
+
+Three runs of the **🤖 Ask PawPal** box. The step log in each is the agent's
+actual tool sequence — plan, retrieve, act, check, fix.
+
+### 1. A broad ask — retrieval decides the routine
+
+> **Input:** *"Set up a daily routine for Mochi. I'm at work 09:00–17:00."*
+
+Mochi is a high-energy Shiba Inu with no tasks yet. Because the owner gave no
+durations, the agent retrieves before deciding anything:
+
+```
+1. show_current_state -> Pet: Mochi (dog, Shiba Inu, high energy) / (no tasks)
+2. lookup_care_guidance -> [dog_high_energy.md] 60-90 min of daily exercise,
+   better split across two walks... [breed_shiba_inu.md] independent, high prey
+   drive, needs a securely fenced area or a leash...
+3. add_commitment -> Added commitment 'Work' 09:00-17:00.
+4. add_care_task -> Added 'Morning walk' for Mochi at 07:00: 45 min, high priority
+5. add_care_task -> Added 'Evening walk' for Mochi at 17:30: 40 min, high priority
+6. add_care_task -> Added 'Enrichment / puzzle feeder' for Mochi (no preferred
+   time): 15 min, medium priority
+7. build_plan -> Plan for 2026-08-04: 07:00-07:45 Morning walk... 
+8. review_plan -> OK: no conflicts, and every pending task was placed.
+```
+
+> **Output:** *"Mochi's on a two-walk day: a 45-minute walk at 07:00 before you
+> leave and a 40-minute one at 17:30 when you're back, plus 15 minutes of puzzle
+> feeder in the morning. The split is from `dog_high_energy.md`, which puts a
+> high-energy dog at 60–90 minutes a day and recommends splitting it rather than
+> one long session. `breed_shiba_inu.md` notes Shibas have high prey drive, so keep
+> both walks leashed. Nothing clashed with work."*
+
+The schedule table above redraws with all three tasks — the agent's tools mutated
+the same `Owner`.
+
+### 2. A request that doesn't fit — the fix step earns its place
+
+> **Input:** *"Mochi needs a 45-minute walk at 07:30 and Luna needs feeding at
+> 07:30 too. I'm at work 09:00–17:00."*
+
+```
+1. show_current_state -> Pet: Mochi (dog...), Pet: Luna (cat...)
+2. add_care_task -> Added 'Morning walk' for Mochi at 07:30: 45 min, high priority
+3. add_care_task -> Added 'Feeding' for Luna at 07:30: 15 min, high priority
+4. build_plan -> Plan for 2026-08-04: ...
+5. review_plan -> Problems with the current plan:
+     - conflict: 'Morning walk' for Mochi (07:30-08:15) overlaps 'Feeding' for
+       Luna (07:30-07:45).
+   Open gaps you can move a task into:
+     - 06:00-07:30 (90 min free)
+6. retime_task -> 'Feeding' for Luna: preferred time 07:30 -> 07:00.
+7. build_plan -> 07:00-07:15 Feeding for Luna... 07:30-08:15 Morning walk...
+8. review_plan -> OK: no conflicts, and every pending task was placed.
+```
+
+> **Output:** *"Both were set for 07:30 and you can't do them at once, so I moved
+> Luna's feeding to 07:00 — it's the shorter one and 15 minutes is easier to shift
+> than a 45-minute walk. Mochi's walk kept the 07:30 you asked for. Both are done
+> before work at 09:00."*
+
+The conflict was found by the **scheduler**, not by the model's opinion of its own
+work — `review_plan` reports `detect_conflicts()` and `schedule.unplaced` directly.
+
+### 3. A pet that doesn't exist — a guardrail, not a hallucination
+
+> **Input:** *"Book a grooming session for Biscuit tomorrow."*
+
+```
+1. show_current_state -> Pet: Mochi (dog, Shiba Inu, high energy)
+```
+
+> **Output:** *"You don't have a pet called Biscuit — the only pet on your account
+> is Mochi. Add Biscuit in the Pets section above and I'll schedule the grooming.
+> (Worth knowing either way: PawPal+ only plans one day at a time, so I can't book
+> anything for tomorrow yet.)"*
+
+It stopped after one tool call rather than inventing a pet. If it had tried,
+`add_care_task` would have returned `"Error: no pet named 'Biscuit'. The owner's
+pets are: Mochi."` — an error string the model reads and corrects, not an exception
+that ends the run.
 
 ## 🖥️ Sample Output
 
@@ -332,6 +445,52 @@ malformed note fails the suite instead of quietly dropping out of retrieval.
 These notes are general-interest care writing for a course project — **not
 veterinary advice**, as `knowledge/README.md` says.
 
+## 🛠️ Design Decisions
+
+Five choices shaped this build, each with something given up.
+
+**1. The scheduler stays the source of truth; the AI is confined to judgment.**
+The model could have written the timetable itself in one call. Instead it can only
+add, retime, and resize — `Schedule.build()` makes every placement. *Gained:* the
+deterministic logic and its 38 tests stay authoritative, and the plan can't
+double-book no matter what the model says. *Cost:* more round trips per request,
+and the model can't do anything the tools don't expose (it can't split one task
+into two, for example).
+
+**2. The check step reads the domain model, not the model's self-assessment.**
+`review_plan()` returns `detect_conflicts()` and `schedule.unplaced` verbatim.
+*Gained:* "did it work" has an objective answer, which is the hard part of any
+self-checking agent. *Cost:* the agent only catches failures the scheduler already
+knows how to name — it won't notice a plan that's valid but silly.
+
+**3. Keyword scoring for retrieval, not embeddings.**
+No vector store, no embedding model, no network call, no extra dependency — for
+nine short notes that's the honest choice, and deterministic scoring lets the tests
+assert on *exact rankings*. *Cost:* it matches words, not meaning. That bit
+immediately (`"feed"` missing `"feeding"`), and the fixes were a stemmer plus a
+relevance floor. A query with entirely different vocabulary still underperforms.
+
+**4. Tools return error strings; they never raise.**
+`_dispatch` turns an unknown tool name or a wrong argument set into a message the
+model can read. *Gained:* the loop recovers from a mis-call on the next turn
+instead of dying. *Cost:* a real bug can be swallowed as a "the model will handle
+it" string, so the tests assert on the exact error text.
+
+**5. A hand-rolled tool loop, and tool implementations that don't know a provider
+exists.**
+The loop is written out — send history, execute calls, append results, resend —
+rather than delegated to an SDK auto-execute helper. *Gained:* the agentic loop is
+readable, and the hard turn cap lives somewhere the model can't ignore. *Proof it
+paid off:* this project started on Claude and moved to Gemini; only the bottom
+third of `pawpal_agent.py` changed, and 81 of the 117 tests never noticed.
+*Cost:* the tool schemas are hand-written JSON Schema and could drift from the
+Python signatures — so `test_declarations_match_their_implementations` cross-checks
+them with `inspect`.
+
+**Two caps, in two different places, on purpose.** `MAX_REPAIR_ROUNDS = 3` is a
+prompt instruction the model can ignore; `MAX_MODEL_TURNS = 15` is enforced in code
+and it can't. The second exists because the first is advice.
+
 ## 🧪 Testing PawPal+
 
 Run the full test suite from the project root:
@@ -495,6 +654,62 @@ implementation already assumes rather than proving the design is complete. One k
 buffer should also be enforced between a task and a fixed commitment, not just
 between two tasks. Fresh eyes or real-world use could still
 surface a case neither the code nor the tests anticipated.
+
+### Testing Summary — what worked, what didn't, what I learned
+
+**What worked.** All 117 tests pass offline, with no API key and no network — the
+SDK is imported lazily inside `plan_day()` and retrieval only reads local files, so
+the whole suite runs in 0.07s and belongs in CI. Splitting the agent into plain
+functions over an `Owner` is what made that possible: the tools, the retrieval
+ranking, and the scheduler are all testable without a model in the loop. The repair
+path is covered end to end (conflict → retime → rebuild → clean review), so the
+most valuable behavior isn't taken on faith.
+
+**What didn't.** Three tests failed on first write, and each was a real bug, not a
+bad test:
+
+- `"07:99"` sailed past a naive total-minutes bounds check — it parses to 519
+  minutes, which looks legal. `_valid_hhmm` now checks hours and minutes as
+  separate fields.
+- Un-padded `"8:00"` would have broken `sort_by_time()`, which sorts `"HH:MM"` as
+  plain strings — `"8:00"` sorts *after* `"10:00"`. Hence the two-digit requirement.
+- `"feed my pets"` retrieved a sentence about cats picking fights instead of the
+  feeding note, because the note says "feeding". That produced the stemmer and the
+  `MIN_SCORE = 4` floor.
+
+**What I deliberately didn't test.** Whether the model picks the *sensible* task to
+move. That needs a live API and is non-deterministic, so it's checked by hand
+through the step log rather than asserted in CI. It's the biggest gap in the
+coverage and I'd rather name it than paper over it.
+
+**What I learned.** Tests written *after* the code mostly confirm what the
+implementation already assumes — which is why the confidence rating above is 3 and
+not 5. The tests that found bugs were the ones where I asked "what input would look
+valid but isn't?" instead of "does the happy path work?". For the AI half, the
+lesson was that the testable surface is a design decision: an agent built around
+one SDK's decorators would have needed a live model to test at all.
+
+## 🔍 Reflection
+
+Building this taught me that the interesting engineering in an AI system is mostly
+about *what you refuse to let the model do*. My first instinct was to hand the whole
+scheduling problem to Gemini in one call — it can obviously produce a timetable.
+The version that actually works does the opposite: it takes placement away from the
+model entirely and gives it two much smaller jobs, deciding what to schedule and
+deciding how to repair a plan that code has already declared broken. That boundary
+is where the reliability came from, and it also happens to be what made the system
+testable and provider-portable.
+
+The other lesson was about verification. A self-checking agent is only as good as
+its check, and mine works because the project already had an objective one —
+`detect_conflicts()` and `schedule.unplaced` are facts, not opinions. When I asked
+the model to judge its own plan directly, it was happy to call a broken schedule
+fine. Grounding the check in the domain model rather than in the model's judgment
+is the single decision I'd carry into any future AI project.
+
+> **The graded responsible-AI reflection** — how I collaborated with AI, one helpful
+> and one flawed AI suggestion, and the system's limitations — is in
+> **[`model_card.md`](model_card.md)**.
 
 ## 📐 Smarter Scheduling
 

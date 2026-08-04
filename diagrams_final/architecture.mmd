@@ -1,0 +1,58 @@
+flowchart TB
+    %% PawPal+ system architecture — components, data flow, and where results get checked.
+    %% Read top to bottom: input -> AI planner loop -> deterministic scheduler -> output.
+
+    subgraph IN["INPUT"]
+        User([Pet owner])
+        UI["Streamlit UI<br/>app.py"]
+    end
+
+    subgraph AI["AI LAYER — pawpal_agent.py"]
+        Agent["plan_day tool loop<br/>plan - act - check - fix<br/>caps: 3 repair rounds, 15 turns"]
+        Model["Gemini 3.6 Flash<br/>+ TOOL_DECLARATIONS"]
+        Retriever["Retriever<br/>pawpal_knowledge.py<br/>stem, score, top-k"]
+        KB[("knowledge/<br/>9 notes, 36 chunks")]
+    end
+
+    subgraph CORE["SOURCE OF TRUTH — pawpal_system.py"]
+        Sched["Schedule.build<br/>priority-first placement"]
+        Eval["Evaluator: review_plan<br/>detect_conflicts + unplaced + open gaps"]
+    end
+
+    subgraph OUT["OUTPUT"]
+        Tables["Schedule table,<br/>unplaced + conflict warnings"]
+        Log["Step log<br/>every tool call and result"]
+    end
+
+    subgraph CHECK["VERIFICATION"]
+        Tests["pytest — 117 tests<br/>tools, retrieval ranking, scheduler<br/>no API key, no network"]
+        Human["Human review<br/>reads step log, cited notes,<br/>and the corpus expander"]
+    end
+
+    User -->|plain-English request| UI
+    UI -->|plan_day owner, request| Agent
+    Agent <-->|history + tool calls| Model
+    Agent -->|lookup_care_guidance| Retriever
+    Retriever --> KB
+    KB -->|cited chunks| Retriever
+    Retriever -->|grounded care notes| Agent
+    Agent -->|add_care_task / add_commitment / build_plan| Sched
+    Sched --> Eval
+    Eval -->|"OK, or conflicts + unplaced + gaps"| Agent
+    Agent -.->|"FIX: retime_task / resize_task, then rebuild"| Sched
+    Sched -->|mutated Owner| Tables
+    Agent -->|AgentResult.actions| Log
+
+    Tests -.->|assert behavior| Sched
+    Tests -.->|assert ranking| Retriever
+    Tests -.->|assert tools never raise| Agent
+    Log -.->|inspect| Human
+    Tables -.->|inspect| Human
+    Human -.->|correct the request, edit times by hand| UI
+
+    classDef ai fill:#e8f0fe,stroke:#4285f4
+    classDef core fill:#e6f4ea,stroke:#34a853
+    classDef check fill:#fef7e0,stroke:#f9ab00
+    class Agent,Model,Retriever,KB ai
+    class Sched,Eval core
+    class Tests,Human check

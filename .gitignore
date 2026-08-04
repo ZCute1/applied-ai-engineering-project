@@ -4,7 +4,8 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# Secrets — the Anthropic API key lives in the environment, never in the repo.
+# Secrets — the Gemini API key lives in the environment, never in the repo.
 .env
 .env.*
 .streamlit/secrets.toml
+.DS_Store
