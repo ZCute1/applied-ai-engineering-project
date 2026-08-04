@@ -1,2 +1,7 @@
 streamlit>=1.30
 pytest>=7.0
+# Official Google Gen AI SDK — powers the AI planner in pawpal_agent.py (the
+# Gemini client and the Interactions API that drives the plan/act/check loop).
+# Needs a GEMINI_API_KEY environment variable at runtime; get a free key at
+# https://aistudio.google.com/apikey. The key itself is never stored in the repo.
+google-genai>=2.16

@@ -1,0 +1,141 @@
+classDiagram
+    %% PawPal+ — pet care planning assistant with an AI planner.
+    %% Domain model (pawpal_system.py), the agentic AI layer (pawpal_agent.py),
+    %% and the retrieval corpus it grounds its care advice in (pawpal_knowledge.py).
+    %% Schedule = the owner's day: fixed commitments (time constraints) + pet tasks the scheduler places around them.
+    %% Times are stored as minutes since midnight (int); module helpers fmt()/to_minutes()/_overlaps() are free functions, not class methods.
+    %% Dependency direction is one-way: PawPalAgent depends on the domain, never the reverse — so the
+    %% scheduler and its tests run with no AI dependency at all.
+
+    class Owner {
+        +str name
+        +List~Pet~ pets
+        +Schedule schedule
+        +add_pet(pet) None
+        +add_commitment(start, end, label) str
+        +remove_commitment(block) None
+        +move_commitment(block, new_start) None
+        +check_off(task) None
+        +start_new_day() None
+        +build_day() List~TimeBlock~
+    }
+
+    class Pet {
+        +str name
+        +str species
+        +str breed
+        +str activity_level
+        +List~Task~ tasks
+        +add_task(task) None
+    }
+
+    class Task {
+        +str title
+        +int duration_minutes
+        +str priority
+        +str scheduled_time
+        +str recurrence
+        +date due_date
+        +bool completed
+        +Pet pet
+        +pet_name() str
+        +mark_complete() None
+    }
+
+    class Schedule {
+        +date day
+        +Owner owner
+        +List~TimeBlock~ blocks
+        +List~Task~ unplaced
+        +all_tasks() List~Task~
+        +pending_tasks() List~Task~
+        +sort_by_time() List~Task~
+        +filter_tasks(pet_name, completed) List~Task~
+        +detect_conflicts() List~str~
+        +add_commitment(start, end, label) str
+        +remove_block(block) None
+        +move_block(block, new_start) None
+        +clear_plan() None
+        +free_windows() List~TimeBlock~
+        +build() List~TimeBlock~
+        +explain() str
+    }
+
+    class TimeBlock {
+        +str label
+        +int start_min
+        +int end_min
+        +Task task
+        +duration() int
+    }
+
+    class PawPalAgent {
+        <<module pawpal_agent.py>>
+        +str DEFAULT_MODEL
+        +int MAX_REPAIR_ROUNDS
+        +str SYSTEM_PROMPT
+        +plan_day(owner, request) AgentResult
+        +show_current_state(owner) str
+        +lookup_care_guidance() str
+        +add_care_task(owner, pet_name, title, duration, priority, time, recurrence) str
+        +add_commitment(owner, label, start_time, end_time) str
+        +retime_task(owner, pet_name, title, scheduled_time) str
+        +resize_task(owner, pet_name, title, duration_minutes) str
+        +build_plan(owner) str
+        +review_plan(owner) str
+        +List TOOL_DECLARATIONS
+        +Dict TOOL_HANDLERS
+        -_dispatch(owner, name, arguments) str
+        -_open_gaps(owner) List
+    }
+
+    class AgentResult {
+        +str reply
+        +List~str~ actions
+    }
+
+    class PawPalKnowledge {
+        <<module pawpal_knowledge.py>>
+        +Path KNOWLEDGE_DIR
+        +int MIN_SCORE
+        +load_chunks(directory) Tuple~Chunk~
+        +search(query, species, activity_level, max_results) List~Result~
+        +format_results(results) str
+        +lookup_care_guidance(query, species, activity_level, max_results) str
+        -_stem(word) str
+        -_tokenize(text) List~str~
+        -_chunk_note(path) List~Chunk~
+        -_score(chunk, tokens, species, activity) int
+    }
+
+    class Chunk {
+        +str source
+        +str title
+        +str heading
+        +str text
+        +str species
+        +str activity_level
+        +Tuple~str~ tags
+        +citation() str
+    }
+
+    class Result {
+        +Chunk chunk
+        +int score
+    }
+
+    Owner "1" --> "0..*" Pet : owns
+    Owner "1" --> "1" Schedule : plans
+    Schedule "1" --> "1" Owner : retrieves tasks from
+    Pet "1" *-- "0..*" Task : has
+    Task "0..*" --> "1" Pet : belongs to
+    Schedule "1" *-- "0..*" TimeBlock : contains
+    TimeBlock "0..1" --> "1" Task : places
+
+    PawPalAgent ..> Owner : acts on (add tasks, build day)
+    PawPalAgent ..> Task : retimes / resizes
+    PawPalAgent ..> Schedule : checks via detect_conflicts + unplaced
+    PawPalAgent ..> AgentResult : returns
+    PawPalAgent ..> PawPalKnowledge : retrieves care guidance from
+    PawPalKnowledge "1" *-- "0..*" Chunk : indexes knowledge/*.md as
+    Result "1" --> "1" Chunk : scores

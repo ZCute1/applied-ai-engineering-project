@@ -1,0 +1,65 @@
+sequenceDiagram
+    %% PawPal+ AI planner — the agentic workflow: plan -> act -> check -> fix.
+    %% Note who executes what: the model *requests* a tool, plan_day executes it
+    %% locally against the real scheduler, and the result goes back to the model.
+    %% The scheduler makes every placement decision. The model decides what to
+    %% schedule and how to repair a plan the scheduler calls broken.
+    %% Keep message text free of semicolons — mermaid reads ";" as the end of a
+    %% statement, so the rest of the line is parsed as new syntax and fails.
+    %% A bare "%%" line with no text after it is also a parse error here.
+
+    actor User as Pet owner
+    participant UI as Streamlit app.py
+    participant Runner as plan_day tool loop
+    participant Model as Gemini 3.6 Flash
+    participant KB as knowledge/ care notes
+    participant Sched as Owner / Schedule
+
+    User->>UI: "Set up a daily routine for Mochi.<br/>I'm at work 09:00-17:00."
+    UI->>Runner: plan_day(owner, request)
+    Runner->>Model: request + tool definitions + system prompt
+
+    Note over Model,Sched: PLAN — look at the day as it actually is
+    Model->>Runner: show_current_state()
+    Runner->>Sched: read pets, tasks, commitments
+    Sched-->>Runner: current state
+    Runner-->>Model: Mochi, dog, Shiba Inu, high energy
+
+    Note over Model,KB: RETRIEVE — ground the routine before inventing it
+    Model->>Runner: lookup_care_guidance, dog, high energy
+    Runner->>KB: score 36 chunks, take top 3
+    KB-->>Runner: dog_high_energy.md, breed_shiba_inu.md
+    Runner-->>Model: 60-90 min daily, split across two walks
+
+    Note over Model,Sched: ACT — add the retrieved tasks, then schedule them
+    Model->>Runner: add_care_task(...) / add_commitment(...)
+    Runner->>Sched: Pet.add_task() / Owner.add_commitment()
+    Sched-->>Runner: confirmation or overlap warning
+    Runner-->>Model: tool result
+
+    loop up to MAX_REPAIR_ROUNDS, currently 3
+        Model->>Runner: build_plan()
+        Runner->>Sched: Owner.build_day()
+        Sched-->>Runner: Schedule.explain()
+        Runner-->>Model: the plan
+
+        Note over Model,Sched: CHECK — the scheduler's own verdict
+        Model->>Runner: review_plan()
+        Runner->>Sched: detect_conflicts + unplaced + open gaps
+        Sched-->>Runner: problems, or OK
+        Runner-->>Model: verdict
+
+        alt problems reported
+            Note over Model,Sched: FIX — move or shorten, then rebuild
+            Model->>Runner: retime_task() / resize_task()
+            Runner->>Sched: update Task.scheduled_time or duration_minutes
+            Sched-->>Runner: confirmation
+            Runner-->>Model: tool result
+        else no conflicts, nothing unplaced
+            Note over Model: done repairing — leave the loop
+        end
+    end
+
+    Model-->>Runner: what was scheduled, what moved, what didn't fit,<br/>and the notes it was based on
+    Runner-->>UI: AgentResult(reply, actions)
+    UI-->>User: answer plus step log, tables redraw from the mutated owner

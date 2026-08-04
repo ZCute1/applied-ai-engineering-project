@@ -1,6 +1,8 @@
 import streamlit as st
 from datetime import date, time
 from pawpal_system import Task, Pet, Owner, fmt
+from pawpal_agent import plan_day
+from pawpal_knowledge import load_chunks
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -253,6 +255,89 @@ if owner.schedule.blocks:
         )
 else:
     st.info("No plan yet. Add tasks/commitments, then click Generate schedule.")
+
+st.divider()
+
+# ----------------------------------------------------------------------------
+# AI planner — the agentic workflow (plan -> act -> check -> fix).
+#
+# The agent's tools ARE the scheduler methods, so a run mutates the same owner
+# the rest of this page is built from. That's why the result is kept in
+# session_state and drawn on the next rerun: the tables above are rendered
+# before the agent runs, so they'd otherwise show the pre-run day.
+# ----------------------------------------------------------------------------
+st.subheader("🤖 Ask PawPal")
+st.caption(
+    "Describe what your pets need in plain English. PawPal looks up care guidance "
+    "for your pet, adds the tasks, runs the scheduler, checks its own plan for "
+    "conflicts and tasks that didn't fit, then repairs it before answering."
+)
+
+# The retrieval corpus, on show. Care advice in the agent's answers may only come
+# from these notes, so being able to read them is how you check its work.
+knowledge = load_chunks()
+if knowledge:
+    sources = sorted({(c.source, c.title, c.species) for c in knowledge})
+    with st.expander(
+        f"📚 Care knowledge base — {len(sources)} notes, {len(knowledge)} sections"
+    ):
+        st.caption(
+            "PawPal searches these before suggesting a routine, and cites the "
+            "filenames it used. General-interest notes for a course project — "
+            "not veterinary advice."
+        )
+        st.table(
+            [
+                {
+                    "Note": source,
+                    "Covers": title,
+                    "Species": species or "any",
+                    "Sections": sum(1 for c in knowledge if c.source == source),
+                }
+                for source, title, species in sources
+            ]
+        )
+
+if "agent_error" in st.session_state:
+    st.error(f"PawPal couldn't run: {st.session_state.agent_error}")
+
+if "agent_result" in st.session_state:
+    result = st.session_state.agent_result
+    if result.reply:
+        st.success(result.reply)
+    # The step log is what makes the loop visible: you can see it build, review,
+    # repair, and rebuild instead of just handing back an answer.
+    with st.expander(f"What PawPal did ({len(result.actions)} steps)"):
+        for i, action in enumerate(result.actions, start=1):
+            st.text(f"{i}. {action}")
+
+if not owner.pets:
+    st.caption("Add a pet first, then PawPal can plan for it.")
+else:
+    with st.form("ask_pawpal"):
+        request = st.text_area(
+            "What do you need?",
+            placeholder=(
+                "Mochi needs a 45-minute walk every morning and Luna needs "
+                "feeding at 07:30. I'm at work 09:00-17:00."
+            ),
+            height=90,
+        )
+        asked = st.form_submit_button("Ask PawPal", type="primary")
+
+    if asked and not request.strip():
+        st.error("Tell PawPal what you need first.")
+    elif asked:
+        with st.spinner("Planning, checking, and repairing…"):
+            # Broad catch on purpose: a missing SDK, a missing API key, or a
+            # rate limit should read as a message in the app, not a traceback.
+            try:
+                st.session_state.agent_result = plan_day(owner, request)
+                st.session_state.pop("agent_error", None)
+            except Exception as exc:
+                st.session_state.agent_error = str(exc)
+                st.session_state.pop("agent_result", None)
+        st.rerun()
 
 st.divider()
 

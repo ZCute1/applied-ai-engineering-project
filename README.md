@@ -32,6 +32,29 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+The AI planner (see **AI Features** below) runs on the Gemini API. The
+`google-genai` line in `requirements.txt` installs the SDK; the key itself is a
+secret read from the environment and is never committed:
+
+```bash
+export GEMINI_API_KEY=your-key   # Windows: setx GEMINI_API_KEY your-key
+```
+
+Get a key free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+— the free tier covers a project of this size, with per-minute and per-day
+request caps you can check at
+[aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit).
+
+The default model is `gemini-3.6-flash`. `PAWPAL_MODEL` overrides it without a
+code change, which is how you'd compare models:
+
+```bash
+PAWPAL_MODEL=gemini-3.5-flash streamlit run app.py
+```
+
+Everything else — the scheduler, the terminal demo, the test suite, and the whole
+Streamlit UI apart from the "Ask PawPal" box — runs without a key.
+
 ### Suggested workflow
 
 1. Read the scenario carefully and identify requirements and edge cases.
@@ -102,6 +125,213 @@ detail).
 - **Plan explanation** — a human-readable summary of why each task was placed
   when, plus what didn't fit.
 
+## AI Features
+
+PawPal+ implements two of the four AI features, as one system:
+
+| Feature | Where | What it does |
+|---|---|---|
+| **Agentic workflow** | `pawpal_agent.py` | Plans, acts, and checks its own work — builds a schedule, finds its own conflicts, repairs them |
+| **Retrieval-Augmented Generation** | `pawpal_knowledge.py` + `knowledge/` | Looks up care guidance *before* suggesting a routine, and cites what it used |
+
+They're combined rather than bolted on side by side: retrieval is a tool inside
+the agent's loop, so the same run that grounds its advice in the knowledge base
+also verifies the schedule it built from that advice.
+
+## AI Feature 1 — Agentic Workflow
+
+`pawpal_agent.py` adds an AI planner that **plans, acts, and checks its own
+work**. You describe the day in plain English; the model turns that into tasks and
+commitments, runs the real scheduler, inspects the result for problems, and
+repairs the plan before answering.
+
+The key design decision: **the scheduler stays the source of truth.** The model
+never writes a timetable. It decides *what* to schedule and *how to repair* a
+plan the scheduler reports as broken — every actual placement is still made by
+`Schedule.build()`. That keeps the deterministic logic (and its 38 tests)
+authoritative and confines the AI to the judgment calls.
+
+### The loop
+
+| Phase | What happens | Tools used |
+|---|---|---|
+| **Plan** | Read the request and the day as it actually is | `show_current_state` |
+| **Retrieve** | Look up what this pet actually needs (see AI Feature 2) | `lookup_care_guidance` |
+| **Act** | Add the tasks, then schedule them | `add_care_task`, `add_commitment`, `build_plan` |
+| **Check** | Ask the scheduler whether the plan works | `review_plan` |
+| **Fix** | Move or shorten what didn't work, then rebuild | `retime_task`, `resize_task`, `build_plan` |
+
+Check and Fix repeat until the plan is clean or three repair rounds are spent.
+
+### Why this project suits an agentic workflow
+
+The check step is the hard part of any self-checking agent, and PawPal+ already
+had it. `Schedule.detect_conflicts()` returns real conflict warnings and
+`schedule.unplaced` lists what didn't fit — so success is measured by the domain
+model, not by the model's opinion of its own work. `review_plan` reports both,
+plus the open gaps still left in the day, giving the agent somewhere concrete to
+move a task to.
+
+### The tools
+
+Each tool is a thin wrapper over a method the scheduler already had:
+
+| Tool | Wraps | Notes |
+|---|---|---|
+| `show_current_state` | `Owner.pets`, `Schedule.blocks` | Pets, tasks, commitments — called first, so the agent can't invent a pet |
+| `lookup_care_guidance` | `pawpal_knowledge.search()` | The retrieval step — the only place its care advice may come from |
+| `add_care_task` | `Pet.add_task(Task(...))` | Validates pet, priority, recurrence, duration, and `"HH:MM"` format |
+| `add_commitment` | `Owner.add_commitment` | Passes the scheduler's overlap warning back to the model |
+| `retime_task` | `Task.scheduled_time` | The main repair tool; `""` hands the choice back to the scheduler |
+| `resize_task` | `Task.duration_minutes` | The other repair: shorten a task to fit a smaller gap |
+| `build_plan` | `Owner.build_day()` | Returns `Schedule.explain()` |
+| `review_plan` | `detect_conflicts()` + `unplaced` | The check step, plus the day's remaining open gaps |
+
+Tools return error *strings* rather than raising: a tool that explains what went
+wrong (`"Error: no pet named 'Luna'. The owner's pets are: Mochi."`) lets the
+model correct itself on the next turn, where an exception would just end the run.
+
+### Using it
+
+In the app, the **🤖 Ask PawPal** section takes a request like:
+
+> *Mochi needs a 45-minute walk every morning and Luna needs feeding at 07:30.
+> I'm at work 09:00–17:00.*
+
+The agent's tools mutate the same `Owner` the rest of the page is built from, so
+the pets, tasks, and schedule tables all update with whatever it did. The
+expander shows the numbered step log — build, review, repair, rebuild — so the
+loop is visible rather than a black box.
+
+### Guardrails
+
+- **Repair cap** — three build/review/fix rounds, so a request that can never be
+  satisfied (20 hours of tasks in a 16-hour day) reports the problem instead of
+  looping forever.
+- **Turn cap** — `MAX_MODEL_TURNS = 15`, enforced in the loop rather than the
+  prompt. The repair cap is an instruction the model *can* ignore; this one it
+  can't, which matters on a free tier with a daily request quota.
+- **No tool can crash the run** — `_dispatch` turns an unknown tool name or a
+  wrong argument set into an error string the model reads and corrects, rather
+  than an exception that ends the loop.
+- **No silent deletion** — the agent may move or shorten a task, never drop one.
+  Anything that truly can't fit is reported to the owner.
+- **No invented pets** — it can only schedule for pets `show_current_state`
+  lists.
+- **Isolated dependency** — `pawpal_system.py` doesn't import `pawpal_agent.py`,
+  and the SDK is imported lazily inside `plan_day()`, so the domain model and
+  every existing test run with no AI dependency at all.
+
+### How it talks to Gemini
+
+`plan_day()` hand-rolls the loop against the Gemini Interactions API rather than
+using an SDK auto-execute helper — send the history, run whatever functions come
+back, append the results, send again:
+
+```python
+interaction = client.interactions.create(
+    model=model, store=False, system_instruction=..., input=history,
+    tools=TOOL_DECLARATIONS,
+)
+calls = [s for s in interaction.steps if s.type == "function_call"]
+if not calls:
+    break                       # the model is answering, so we're done
+for call in calls:
+    result = _dispatch(owner, call.name, call.arguments)
+    history.append({"type": "function_result", "name": call.name,
+                    "call_id": call.id, "result": [{"type": "text", "text": result}]})
+```
+
+`store=False` keeps the conversation on our side — nothing is retained
+server-side between turns, so the history we resend is exactly what we can
+inspect. Parallel function calls are handled: every call in a turn is executed
+and answered before the next request.
+
+Tool schemas are hand-written JSON Schema in `TOOL_DECLARATIONS`, since the API
+takes plain declarations. That risks drifting from the Python functions, so
+`test_declarations_match_their_implementations` compares every schema against
+`inspect.signature` — rename an argument and the suite fails instead of the
+model silently calling a parameter that no longer exists.
+
+**On swapping providers:** this project started on Claude and moved to Gemini.
+Only the bottom third of `pawpal_agent.py` changed — the tool implementations,
+the scheduler, the knowledge base, and 81 of the 117 tests never knew a provider
+existed. Keeping the tools as plain functions over an `Owner`, rather than
+building them around one SDK's decorators, is what made that a contained edit.
+
+## AI Feature 2 — Retrieval-Augmented Generation
+
+Ask *"set up a routine for Mochi"* and a language model will happily produce
+confident numbers — 45 minutes here, twice a day there — with no source behind
+them. `pawpal_knowledge.py` makes the agent **retrieve before it answers**: it
+searches the notes in `knowledge/` for the pet's species, breed, and activity
+level, and builds the task list from what it finds, citing the filenames.
+
+### The pipeline
+
+1. **Load** — every `.md` note in `knowledge/`, parsing the `---` metadata block
+   (`title`, `species`, `activity_level`, `tags`) at the top.
+2. **Chunk** — each note splits into one chunk per `##` heading, so a query about
+   grooming returns the grooming section rather than a whole file. Nine notes
+   currently produce **36 chunks**.
+3. **Score** — weighted keyword matching. Heading, title, and tag hits count 4×;
+   body hits 1×. A chunk whose species matches the pet gets +6, matching activity
+   level +3, and a general note (feeding, medication — no species) +1.
+4. **Retrieve** — top 3 by default, above a relevance floor, each labelled with
+   its source file.
+
+Then generation: the model reads those chunks and turns them into tasks.
+
+### Why keyword scoring, not embeddings
+
+No embedding model, no vector store, no network call, no extra dependency. For
+nine short files that's the honest engineering choice — and because scoring is
+deterministic, `tests/test_knowledge.py` can assert on **exact rankings** rather
+than "something came back".
+
+The tradeoff is real: this matches *words*, not meaning. That bit immediately —
+"when should I **feed** my pets" found nothing, because the note says
+"**feeding**", and the top hit was a stray sentence about cats "picking fights
+with other pets in the house". Two fixes came out of it:
+
+- **A stemmer** (`_stem`) so query and note vocabulary meet: `feeding → feed`,
+  `walking/walks → walk`, `grooming → groom`, `scheduled/schedule → schedul`.
+  Precision suffers slightly (`morning → morn`), but both sides go through the
+  same function, so the match still lands.
+- **A relevance floor** (`MIN_SCORE = 4`) — one tag or heading hit clears it, a
+  single passing mention in prose does not.
+
+A query with entirely different vocabulary would still score lower than it
+deserves; the hand-written `tags` list in each note exists to widen that
+vocabulary. Embeddings would fix it properly, at the cost of a dependency and
+non-deterministic tests.
+
+### Grounding guardrails
+
+- **Cite or don't claim** — the system prompt requires any specific claim about
+  how long, how often, or what a breed needs to come from
+  `lookup_care_guidance`, with the source filenames in the answer.
+- **A miss says so** — when nothing matches, the tool returns *"No care notes
+  matched that query… say so rather than filling the gap with a guess"*, so an
+  empty retrieval produces an admission instead of invention.
+- **Wrong-species notes are excluded** — a cat note answering a dog question is
+  worse than no answer, so a species mismatch drops below the floor.
+- **Metadata alone is never a hit** — a species match with no word overlap won't
+  drag a note in, or every dog question would return every dog note.
+- **Capped context** — 5 chunks maximum per lookup, 900 characters each.
+- **Inspectable corpus** — the app lists all nine notes in an expander, so you can
+  read the source the advice came from.
+
+### Adding to the knowledge base
+
+Drop a `.md` file in `knowledge/` with the metadata block; the loader finds it
+automatically. `tests/test_knowledge.py` verifies every note parses and carries
+`title`, `heading`, `tags`, and a recognized `species`/`activity_level`, so a
+malformed note fails the suite instead of quietly dropping out of retrieval.
+
+These notes are general-interest care writing for a course project — **not
+veterinary advice**, as `knowledge/README.md` says.
+
 ## 🧪 Testing PawPal+
 
 Run the full test suite from the project root:
@@ -114,8 +344,8 @@ Add `-v` for the per-test breakdown shown below.
 
 ### What the tests cover
 
-The suite (`tests/test_pawpal.py`, 38 tests) exercises the scheduling logic in
-`pawpal_system.py` across seven areas:
+**Scheduler** — `tests/test_pawpal.py` (38 tests) exercises the scheduling logic
+in `pawpal_system.py` across seven areas:
 
 - **Happy paths** — tasks get placed, never overlap commitments, high-priority
   tasks win a contested slot, preferred times are honored (and bumped when
@@ -138,6 +368,61 @@ The suite (`tests/test_pawpal.py`, 38 tests) exercises the scheduling logic in
 - **Day rollover** — future-dated recurrences stay hidden until their day
   arrives, stale tasks roll forward without duplicating, and commitments survive
   the rollover.
+
+**AI planner** — `tests/test_agent.py` (36 tests) covers the deterministic half
+of the agent: the tools the model calls, and the declarations describing them,
+in `pawpal_agent.py`.
+
+- **Adding** — `add_care_task` / `add_commitment` reach the domain model with the
+  right values, pet names match case-insensitively, and the scheduler's overlap
+  warning is passed back to the model.
+- **Repairs** — `retime_task` and `resize_task` change what the next build reads,
+  including the full repair path end to end: conflict → retime → rebuild → clean
+  review.
+- **Review** — the check step reports conflicts, names unplaced tasks with what
+  they need, offers open gaps that account for placed tasks (not just
+  commitments), and ignores completed tasks.
+- **Bad input** — every tool returns an explanatory error string instead of
+  raising, and changes nothing: unknown pets, invalid priorities and
+  recurrences, malformed times, zero durations, backwards commitments. Dispatch
+  also survives a hallucinated tool name and wrong argument names.
+- **Declarations** — the hand-written JSON schemas stay in step with the Python
+  functions they describe: every declared tool has a handler, every parameter is
+  described and typed, and `test_declarations_match_their_implementations`
+  cross-checks each schema against `inspect.signature`.
+
+**Retrieval** — `tests/test_knowledge.py` (43 tests) covers the RAG pipeline in
+`pawpal_knowledge.py`.
+
+- **Loading** — notes chunk by `##` heading, metadata lands on every chunk, blank
+  fields mean "any pet", the directory's README isn't indexed, a missing corpus
+  returns empty rather than raising.
+- **Real corpus** — every note in `knowledge/` parses, has a title, heading, tags
+  and body, and uses a recognized `species`/`activity_level`. Eight
+  parametrized end-to-end queries assert the *right note* wins.
+- **Stemming** — the pairs that have to collide (`feed`/`feeding`,
+  `walk`/`walking`/`walks`, `schedule`/`scheduled`), doubled-consonant handling,
+  short words left alone, and stopwords filtered *after* stemming so `needs`
+  doesn't sneak through as `need`.
+- **Ranking** — tags outrank body text, the species boost picks the right animal,
+  wrong-species notes are excluded, general notes still surface for a specific
+  pet, `max_results` is respected, ranking is deterministic, and metadata alone
+  is never a hit.
+- **No match** — nonsense and empty queries return nothing, and the no-match
+  message tells the model not to guess.
+- **Formatting** — output carries citable filenames and real body text, and long
+  sections are truncated.
+
+Both suites run in the normal test run with **no API key and no network** — the
+SDK is imported lazily inside `plan_day()`, and retrieval only reads local files.
+Three tests caught real bugs while being written: `"07:99"` passed a naive
+total-minutes bounds check (it parses to 519), un-padded `"8:00"` would have
+broken `sort_by_time`'s plain-string sort, and `"feed my pets"` retrieved a
+sentence about cats fighting instead of the feeding note.
+
+What these tests deliberately don't cover is the model's judgment — whether
+the model picks the *sensible* task to move. That needs a live API and would be
+non-deterministic, so it's verified by hand rather than asserted in CI.
 
 Tests are deterministic (dates pinned relative to `today`) and import the
 module's config constants, so they stay valid if those values change.
@@ -195,11 +480,15 @@ tests/test_pawpal.py::TestDayRollover::test_commitments_survive_rollover PASSED 
 ============================== 38 passed in 0.02s ==============================
 ```
 
+That transcript is the scheduler suite on its own, from before the AI features
+were added. With `tests/test_agent.py` (36) and `tests/test_knowledge.py` (43),
+the current total is **117 passed**.
+
 ### Confidence level
 
 **★★★☆☆ (3 / 5)**
 
-All 38 tests pass and cover the core behaviors plus the edge cases I could think
+All 117 tests pass and cover the core behaviors plus the edge cases I could think
 of. I'm holding the rating at 3 stars on purpose: the tests were written *after*
 the code (not test-driven), so they largely confirm the scheduler does what the
 implementation already assumes rather than proving the design is complete. One known open question remains unverified: whether a

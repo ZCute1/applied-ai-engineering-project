@@ -3,3 +3,8 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+
+# Secrets — the Anthropic API key lives in the environment, never in the repo.
+.env
+.env.*
+.streamlit/secrets.toml
