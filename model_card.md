@@ -8,7 +8,7 @@ plain-English request into care tasks, runs the deterministic scheduler in
 and repairs it before answering. Care advice is retrieved from the notes in
 `knowledge/` rather than recalled from the model's memory.
 
-- **Model:** `gemini-3.6-flash` (override with `PAWPAL_MODEL`)
+- **Model:** `gemini-3.5-flash` (override with `PAWPAL_MODEL`)
 - **Interface:** Gemini Interactions API, hand-rolled tool loop, `store=False`
 - **Tools:** 8 (see `TOOL_DECLARATIONS`) — all thin wrappers over scheduler methods
 - **Retrieval:** deterministic weighted keyword scoring over 9 notes / 36 chunks

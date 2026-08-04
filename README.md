@@ -13,7 +13,7 @@ decision is made by code that has 117 tests behind it.
 
 ### The original project
 
-This builds on **PawPal+ (Modules 1–3)**, a pet care planning assistant designed
+This builds on **PawPal+**, a pet care planning assistant designed
 from UML and implemented in Python. Its original goal was to represent an owner,
 their pets, and their care tasks, then build and explain a daily schedule that
 respected duration, priority, preferred times, and the owner's fixed commitments.
@@ -70,19 +70,23 @@ The AI planner (see **AI Features** below) runs on the Gemini API. The
 secret read from the environment and is never committed:
 
 ```bash
-export GEMINI_API_KEY=your-key   # Windows: setx GEMINI_API_KEY your-key
+cp .env.example .env             # then paste your key into .env
 ```
+
+`.env` is gitignored and loaded automatically at import. `.env.example` is the
+committed template — it never holds a real key. A shell `export GEMINI_API_KEY=...`
+still works and takes precedence if you'd rather not use a file.
 
 Get a key free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 — the free tier covers a project of this size, with per-minute and per-day
 request caps you can check at
 [aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit).
 
-The default model is `gemini-3.6-flash`. `PAWPAL_MODEL` overrides it without a
+The default model is `gemini-3.5-flash`. `PAWPAL_MODEL` overrides it without a
 code change, which is how you'd compare models:
 
 ```bash
-PAWPAL_MODEL=gemini-3.5-flash streamlit run app.py
+PAWPAL_MODEL=gemini-3.6-flash streamlit run app.py
 ```
 
 Everything else — the scheduler, the terminal demo, the test suite, and the whole
@@ -98,8 +102,63 @@ python -m pytest         # 117 tests, no key and no network needed
 
 ## 💬 Sample Interactions
 
-Three runs of the **🤖 Ask PawPal** box. The step log in each is the agent's
-actual tool sequence — plan, retrieve, act, check, fix.
+Runs of the **🤖 Ask PawPal** box. Example 0 is a **verbatim transcript** of a live
+run; the examples after it are annotated walkthroughs of the same behavior with the
+tool sequence spelled out.
+
+### 0. Verified live run — three pets, one work block
+
+```
+$ streamlit run app.py
+# Pets added: Mochi (dog, Shiba Inu, high), Sky (dog, Corgi, medium),
+#             Sparkle (cat, Domestic Shorthair, low)
+# Model: gemini-3.5-flash
+```
+
+**Input**
+
+```
+Mochi needs a 45 min walk every morning and Sky needs to be groomed at 8:45 am
+and Sparkle needs to get her nails trimmed at 6pm. I work from 9:00 to 17:00,
+what should I do.
+```
+
+**Output**
+
+```
+I have successfully built today's schedule for you and your pets with no conflicts:
+
+Mochi's Morning Walk: Scheduled for 07:50–08:35 (45 mins). As high-energy dogs,
+Shiba Inus benefit from consistent exercise to prevent boredom, needing 60+
+minutes of daily activity split across the day; keep Mochi on a leash due to a
+strong prey drive (breed_shiba_inu.md).
+
+Sky's Grooming: Scheduled for 08:45–09:00 (15 mins), fitting right before your
+work commitment. (No specific grooming guidelines for Corgis were found).
+
+Your Work Commitment: Blocked from 09:00–17:00.
+
+Sparkle's Nail Trim: Scheduled for 18:00–18:15 (15 mins). Indoor cats need their
+claws trimmed every few weeks, and keeping these sessions short (measured in
+minutes) helps keep them cooperative (cat_grooming.md).
+```
+
+**What this run demonstrates**
+
+- **RAG is doing real work.** The Shiba advice is cited to `breed_shiba_inu.md` and
+  the nail-trim advice to `cat_grooming.md`. Neither number came from the model's
+  memory — the owner never mentioned exercise minutes or trim frequency.
+- **The no-match guardrail fires honestly.** *"No specific grooming guidelines for
+  Corgis were found"* — the corpus has one breed note (Shiba Inu), so rather than
+  inventing Corgi-specific advice it said so and scheduled exactly what was asked.
+  That admission is the guardrail working, not a shortfall.
+- **The scheduler placed everything, not the model.** Mochi's walk landed at
+  **07:50**, a time nobody requested: `Schedule.build()` worked backwards from
+  Sky's fixed 08:45 grooming and the 10-minute buffer to find the nearest slot that
+  fits 45 minutes. The model asked for a morning walk; the code chose 07:50.
+- **The check step passed on the first build.** *"with no conflicts"* comes from
+  `review_plan()` returning `detect_conflicts()` and `unplaced` — an empty result
+  here, so no repair round was needed.
 
 ### 1. A broad ask — retrieval decides the routine
 

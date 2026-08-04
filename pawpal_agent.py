@@ -35,6 +35,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+# Load GEMINI_API_KEY from a local .env if there is one, so the key lives in a
+# gitignored file rather than in shell history. A real environment variable always
+# wins (override=False), and a missing .env or a missing package is fine — the
+# export-it-yourself path still works.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ModuleNotFoundError:  # pragma: no cover - optional convenience dependency
+    pass
+
 from pawpal_knowledge import lookup_care_guidance
 from pawpal_system import (
     BUFFER_MIN,
@@ -56,7 +67,7 @@ from pawpal_system import (
 #   PAWPAL_MODEL=gemini-3.5-flash streamlit run app.py
 #
 # plan_day(model=...) takes a per-call override too.
-DEFAULT_MODEL = os.getenv("PAWPAL_MODEL", "gemini-3.6-flash")
+DEFAULT_MODEL = os.getenv("PAWPAL_MODEL", "gemini-3.5-flash")
 
 # Ceiling on build -> review -> fix cycles, enforced through the system prompt.
 # Without a cap, a request that can never be satisfied — 20 hours of tasks in a
